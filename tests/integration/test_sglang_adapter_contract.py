@@ -17,6 +17,7 @@ from verl_speco.integration.sglang_adapter import (
 )
 from verl_speco.integration.sglang_runtime import (
     _SpecoSGLangHttpServerMixin,
+    _server_args_overrides_from_drafter,
     attach_update_draft_weights_to_rollout,
     speco_update_draft_weights,
 )
@@ -84,6 +85,40 @@ def test_sglang_patch_install_forwards_config_and_is_repeatable(monkeypatch) -> 
     assert install_calls[0]["target_weight_loader"] == "target.loader"
     assert install_calls[0]["draft_weight_loader"] == "draft.loader"
     assert install_calls[0]["patches"] == {"hidden_states_tensor_output"}
+
+
+def test_sglang_drafter_load_format_defaults_to_auto() -> None:
+    supported_fields = {
+        "speculative_algorithm",
+        "speculative_draft_model_path",
+        "speculative_draft_load_format",
+    }
+    overrides = _server_args_overrides_from_drafter(
+        {
+            "enable": True,
+            "speculative_algorithm": "DFLASH",
+            "model_path": "/models/dflash-drafter",
+        },
+        supported_fields,
+    )
+
+    assert overrides == {
+        "speculative_algorithm": "DFLASH",
+        "speculative_draft_model_path": "/models/dflash-drafter",
+        "speculative_draft_load_format": "auto",
+    }
+
+
+def test_sglang_drafter_load_format_can_be_overridden() -> None:
+    overrides = _server_args_overrides_from_drafter(
+        {
+            "enable": True,
+            "sglang": {"draft_load_format": "bitsandbytes"},
+        },
+        {"speculative_draft_load_format"},
+    )
+
+    assert overrides["speculative_draft_load_format"] == "bitsandbytes"
 
 
 def test_dflash_hidden_collection_requests_aux_hidden_without_raw_topk(monkeypatch) -> None:

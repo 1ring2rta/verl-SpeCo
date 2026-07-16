@@ -34,6 +34,11 @@ actor_rollout_ref:
         spec_verify_tokens: 3
         cuda_graph_max_bs: null
 
+      sglang:
+        # Keep the external drafter on a real checkpoint loader even when the
+        # target uses load_format=dummy before verl synchronizes its weights.
+        draft_load_format: auto
+
       vllm:
         draft_tensor_parallel_size: null
         max_model_len: null

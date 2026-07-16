@@ -267,6 +267,11 @@ Important groups:
 - `drafter.enable`: enables speculative decoding at rollout time.
 - `drafter.enable_drafter_training`: enables online drafter trainer workers.
 - `drafter.rollout.*`: controls speculative steps, top-k, and verify tokens.
+- `drafter.sglang.draft_load_format`: controls the external SGLang drafter
+  checkpoint loader independently of the target loader. It defaults to `auto`,
+  so a hybrid rollout can initialize the target with `load_format=dummy`
+  without also replacing the static drafter checkpoint with dummy weights. Set
+  it to `null` to preserve SGLang's inherited target-loader behavior.
 - `drafter.training.*`: controls hidden-state collection, training interval,
   publish interval, update mode, and DFLASH/DSpark-specific training options.
 - `drafter.vllm.*`: contains vLLM-specific drafter overrides.

@@ -514,10 +514,12 @@ def _server_args_overrides_from_drafter(drafter_cfg: dict[str, Any], supported_f
         return {}
 
     rollout_cfg = drafter_cfg.get("rollout") or {}
+    sglang_cfg = drafter_cfg.get("sglang") or {}
     training_cfg = drafter_cfg.get("training") or {}
     overrides = {
         "speculative_algorithm": drafter_cfg.get("speculative_algorithm"),
         "speculative_draft_model_path": drafter_cfg.get("model_path"),
+        "speculative_draft_load_format": sglang_cfg.get("draft_load_format", "auto"),
         "speculative_num_steps": rollout_cfg.get("spec_steps"),
         "speculative_eagle_topk": rollout_cfg.get("spec_topk"),
         "speculative_num_draft_tokens": rollout_cfg.get("spec_verify_tokens"),

@@ -26,6 +26,7 @@ def test_overlay_has_expected_default_drafter_shape() -> None:
     assert raw.speco.verl_base.commit == "7aed6b230776f963fa09509c10d9c3a767d1102c"
     assert drafter.enable is False
     assert drafter.enable_drafter_training is False
+    assert drafter.sglang.draft_load_format == "auto"
     assert drafter.training.collect_hidden_states_from_sgl is False
     assert drafter.training.collect_hidden_states_from_old_logprob is False
 
