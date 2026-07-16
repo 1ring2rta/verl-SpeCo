@@ -17,23 +17,54 @@ The paired arms differ in exactly one setting:
 - `FMT=auto`: load the external drafter checkpoint normally while retaining the
   target's hybrid-engine dummy initialization.
 
-## Clean setup
+## Pinned CUDA 12.8 setup
 
 The experiment branch contains the PR 2 commit plus these helper files. The
 formal PR branch remains `agent/fix-sglang-draft-load-format`.
 
-```bash
-git clone --branch experiment/pr2-static-drafter-ab \
-  https://github.com/1ring2rta/verl-SpeCo.git
+This experiment intentionally reuses the DFlash runtime that already works on
+the CUDA 12.8 machine. Do **not** reinstall or reset its SGLang checkout: it
+contains the Qwen3.5/GDN/DFlash backports needed by this machine. Also do not
+run an unqualified `pip install -e ./verl-v080`; dependency resolution can
+replace the tested Transformers, Ray, PyArrow, and CUDA-extension stack.
 
-git clone https://github.com/verl-project/verl.git verl-v080
-git -C verl-v080 checkout 7aed6b230776f963fa09509c10d9c3a767d1102c
-python -m pip install -e ./verl-v080
+From the existing outer `verl-SpeCo` checkout, use the known-good interpreter
+and source overlays directly:
+
+```bash
+export ROOT=/inspire/ssd/project/sais-bio/public/hanchen
+export SPECO_ROOT="$ROOT/verl-SpeCo"
+export VERL_ROOT="$SPECO_ROOT/verl-v080"
+export SGLANG_ROOT="$ROOT/repro-dflash/sglang-dflash22077"
+export PYTHON="$ROOT/verl/.venv-verl-dflash/bin/python"
+set -o pipefail
+
+git -C "$SPECO_ROOT" switch experiment/pr2-static-drafter-ab
+git -C "$SPECO_ROOT" pull --ff-only
+git -C "$VERL_ROOT" checkout 7aed6b230776f963fa09509c10d9c3a767d1102c
+
+export PYTHONPATH="$SPECO_ROOT:$VERL_ROOT:$SGLANG_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-Use a clean SGLang >= 0.5.12 environment. The upstream SpeCo Dockerfile uses
-`verlai/verl:sgl0512.dev1`; using that image and then installing the pinned VeRL
-checkout above gives the cleanest PR evidence.
+The extra `$SPECO_ROOT/verl-SpeCo` directory created by cloning while already
+inside the repository is a duplicate and is not used by these commands.
+
+The enforced runtime versions are Python 3.11, PyTorch 2.9.1+cu128, SGLang
+0.5.13, Transformers 5.3.0, Ray 2.55.1, PyArrow 24.0.0, Safetensors 0.8.0,
+and TensorDict 0.10.0. Its SGLang base revision is
+`f08726fd56c7ff6d8bd258f1545f98148fa4ef58`; the tracked dirty diff SHA-256 is
+`5839e45bcf4c6fc85f11385866fe7f1b00bbe973aba941ec5cf7bf4415eb5b71`,
+and the required untracked `dflash_timing.py` SHA-256 is
+`567cbdf73c6476cfa6aea143bba0f4d2202f7df6d9955cf350771494bbf472c2`.
+The manifest SHA-256 over all nine untracked Python files below
+`python/sglang` is
+`5f2abdd884b7fa935503c27f8e21dc501a54d976edaa337c6b0fbd533705fc61`.
+The runner records and enforces these values rather than modifying the
+checkout. They do not capture the complete binary environment, so the result
+is machine-specific custom-runtime integration evidence, not a reproduction
+on stock upstream SGLang. This limitation must be disclosed with the PR
+results; an immutable custom-SGLang commit or patch archive is needed before
+making a stronger reproducibility claim.
 
 ## Prepare a data-independent DAPO-Math subset
 
@@ -43,9 +74,8 @@ file, deduplicates by prompt text, and selects the 20 smallest SHA-256 ranks of
 order-independent, and unrelated to either A/B result.
 
 ```bash
-export SPECO_ROOT=$PWD/verl-SpeCo
-export VERL_ROOT=$PWD/verl-v080
-export DATA_DIR=$PWD/data
+export EXP_ROOT="$ROOT/pr2-static-drafter-ab"
+export DATA_DIR="$EXP_ROOT/data"
 mkdir -p "$DATA_DIR"
 
 wget -O "$DATA_DIR/dapo-math-17k.parquet" \
@@ -54,7 +84,7 @@ wget -O "$DATA_DIR/dapo-math-17k.parquet" \
 echo '534375d6bb8630d22ab46a56e11f2ffec1d288d8f7d04099bc82d68948705941  '"$DATA_DIR/dapo-math-17k.parquet" \
   | sha256sum --check
 
-python "$SPECO_ROOT/experiments/pr2_static_drafter_ab/prepare_dapo20.py" \
+"$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/prepare_dapo20.py" \
   "$DATA_DIR/dapo-math-17k.parquet" \
   "$DATA_DIR/dapo-math-hash20.parquet"
 ```
@@ -73,22 +103,43 @@ For a publishable result, pin the target revision to
 equivalent local snapshots.
 
 ```bash
-mkdir -p "$PWD/models"
-hf download Qwen/Qwen3.5-4B \
+mkdir -p "$EXP_ROOT/models"
+"$PYTHON" -m huggingface_hub.cli.hf download Qwen/Qwen3.5-4B \
   --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
-  --local-dir "$PWD/models/Qwen3.5-4B"
-hf download z-lab/Qwen3.5-4B-DFlash \
+  --local-dir "$EXP_ROOT/models/Qwen3.5-4B"
+"$PYTHON" -m huggingface_hub.cli.hf download z-lab/Qwen3.5-4B-DFlash \
   --revision 9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf \
-  --local-dir "$PWD/models/Qwen3.5-4B-DFlash"
+  --local-dir "$EXP_ROOT/models/Qwen3.5-4B-DFlash"
 
-export MODEL_PATH=$PWD/models/Qwen3.5-4B
-export DRAFTER_PATH=$PWD/models/Qwen3.5-4B-DFlash
-export TRAIN_FILE=$DATA_DIR/dapo-math-hash20.parquet
-export OUT=$PWD/pr2-ab-results
+export MODEL_PATH="$EXP_ROOT/models/Qwen3.5-4B"
+export DRAFTER_PATH="$EXP_ROOT/models/Qwen3.5-4B-DFlash"
+export TRAIN_FILE="$DATA_DIR/dapo-math-hash20.parquet"
+export TEST_FILE="$TRAIN_FILE"
+export OUT="$EXP_ROOT/results"
+mkdir -p "$OUT"
 
-FMT=null bash "$SPECO_ROOT/experiments/pr2_static_drafter_ab/run_one.sh"
-FMT=auto bash "$SPECO_ROOT/experiments/pr2_static_drafter_ab/run_one.sh"
+"$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/preflight.py" \
+  | tee "$OUT/preflight.manual.json"
+
+# Release the reservation processes only immediately before taking the GPUs.
+pkill gg
+nvidia-smi
+
+FMT=null bash "$SPECO_ROOT/experiments/pr2_static_drafter_ab/run_one.sh" &&
+  FMT=auto bash "$SPECO_ROOT/experiments/pr2_static_drafter_ab/run_one.sh"
 ```
+
+Each arm runs the same preflight again and stores its report as
+`<run>/preflight.json`. Stop if its status is `error`, if an import resolves
+outside the three configured source roots, or if a reference SGLang hash is
+unexpected. Hash drift is fatal by default; `ALLOW_SGLANG_DRIFT=1` is only for
+an intentional, separately documented runtime and should never be introduced
+between arms. The preflight also requires clean tracked SpeCo and VeRL trees
+and records the exact experiment commit. Absence of `flash_attn.bert_padding`
+is recorded but is not fatal,
+because this configuration disables remove-padding and forces SDPA. A failure
+in that import during the first actor update would identify an additional VeRL
+compatibility path instead of a drafter-loader failure.
 
 On a dedicated machine, the script clears stale local Ray state before each
 arm. Set `RESET_RAY=0` if that machine is intentionally attached to a shared
@@ -98,7 +149,7 @@ Ray cluster. A reasonable 2 x H800 estimate is 30--65 minutes per arm and
 ## Summarize
 
 ```bash
-python "$SPECO_ROOT/experiments/pr2_static_drafter_ab/summarize.py" \
+"$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/summarize.py" \
   "$OUT/qwen35-dflash-dapo-math20-null/train.log" \
   "$OUT/qwen35-dflash-dapo-math20-auto/train.log"
 ```

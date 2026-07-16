@@ -3,6 +3,8 @@ set -euo pipefail
 
 : "${SPECO_ROOT:?set SPECO_ROOT to the verl-SpeCo checkout}"
 : "${VERL_ROOT:?set VERL_ROOT to VeRL commit 7aed6b230776f963fa09509c10d9c3a767d1102c}"
+: "${SGLANG_ROOT:?set SGLANG_ROOT to the tested custom SGLang checkout}"
+: "${PYTHON:?set PYTHON to the tested DFlash Python interpreter}"
 : "${MODEL_PATH:?set MODEL_PATH to Qwen3.5-4B}"
 : "${DRAFTER_PATH:?set DRAFTER_PATH to Qwen3.5-4B-DFlash}"
 : "${TRAIN_FILE:?set TRAIN_FILE to the fixed 20-row train parquet}"
@@ -14,18 +16,14 @@ if [[ "$FMT" != "null" && "$FMT" != "auto" ]]; then
   exit 2
 fi
 
-PYTHON=${PYTHON:-python}
 RESET_RAY=${RESET_RAY:-1}
 TEST_FILE=${TEST_FILE:-$TRAIN_FILE}
 RUN="qwen35-dflash-dapo-math20-${FMT}"
 RUN_DIR="$OUT/$RUN"
 mkdir -p "$RUN_DIR"
 
-if [[ "$RESET_RAY" == "1" ]] && command -v ray >/dev/null 2>&1; then
-  ray stop --force || true
-fi
-
-export PYTHONPATH="$SPECO_ROOT:$VERL_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export SPECO_ROOT VERL_ROOT SGLANG_ROOT PYTHON MODEL_PATH DRAFTER_PATH TRAIN_FILE TEST_FILE
+export PYTHONPATH="$SPECO_ROOT:$VERL_ROOT:$SGLANG_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
 export VERL_SPECO_STRICT_VERL=1
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 export HYDRA_FULL_ERROR=1
@@ -33,6 +31,13 @@ export TOKENIZERS_PARALLELISM=false
 export USE_HUB_KERNELS=NO
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
+
+"$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/preflight.py" \
+  | tee "$RUN_DIR/preflight.json"
+
+if [[ "$RESET_RAY" == "1" ]]; then
+  "$PYTHON" -m ray.scripts.scripts stop --force || true
+fi
 
 "$PYTHON" -m verl_speco.main \
   algorithm.adv_estimator=grpo \
