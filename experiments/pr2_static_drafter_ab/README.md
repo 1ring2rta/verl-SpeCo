@@ -39,6 +39,10 @@ export SGLANG_ROOT="$ROOT/repro-dflash/sglang-dflash22077"
 export PYTHON="$ROOT/verl/.venv-verl-dflash/bin/python"
 set -o pipefail
 
+# The machine uses a SOCKS proxy. Add only httpx's missing pure-Python extra;
+# --no-deps prevents pip from resolving or replacing the pinned runtime stack.
+"$PYTHON" -m pip install --no-deps 'socksio==1.0.0'
+
 git -C "$SPECO_ROOT" switch experiment/pr2-static-drafter-ab
 git -C "$SPECO_ROOT" pull --ff-only
 git -C "$VERL_ROOT" checkout 7aed6b230776f963fa09509c10d9c3a767d1102c
@@ -51,7 +55,7 @@ inside the repository is a duplicate and is not used by these commands.
 
 The enforced runtime versions are Python 3.11, PyTorch 2.9.1+cu128, SGLang
 0.5.13, Transformers 5.3.0, Ray 2.55.1, PyArrow 24.0.0, Safetensors 0.8.0,
-and TensorDict 0.10.0. Its SGLang base revision is
+SocksIO 1.0.0, and TensorDict 0.10.0. Its SGLang base revision is
 `f08726fd56c7ff6d8bd258f1545f98148fa4ef58`; the tracked dirty diff SHA-256 is
 `5839e45bcf4c6fc85f11385866fe7f1b00bbe973aba941ec5cf7bf4415eb5b71`,
 and the required untracked `dflash_timing.py` SHA-256 is
