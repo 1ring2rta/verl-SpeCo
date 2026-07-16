@@ -22,6 +22,11 @@ KEYS = (
     "perf/time_per_step",
     "critic/score/mean",
     "critic/rewards/mean",
+    "critic/acc/mean",
+    "critic/overlong_reward/mean",
+    "critic/advantages/min",
+    "critic/advantages/max",
+    "response_length/mean",
     "actor/grad_norm",
 )
 
@@ -61,6 +66,13 @@ def summarize(path: pathlib.Path) -> dict[str, object]:
     gen_seconds = metric_values(rows[1:], "timing_s/gen")
     gen_ms_per_token = metric_values(rows[1:], "timing_per_token_ms/gen")
     grad_norms = metric_values(rows, "actor/grad_norm")
+    advantage_ranges = [
+        row["critic/advantages/max"] - row["critic/advantages/min"]
+        for row in rows
+        if "critic/advantages/max" in row and "critic/advantages/min" in row
+    ]
+    nonzero_grad_steps = sum(value > 0 for value in grad_norms)
+    nonzero_advantage_steps = sum(value > 0 for value in advantage_ranges)
 
     return {
         "log": str(path),
@@ -79,7 +91,13 @@ def summarize(path: pathlib.Path) -> dict[str, object]:
         "gen_ms_tok_median_steps2_plus": median(gen_ms_per_token),
         "score_mean": mean(metric_values(rows, "critic/score/mean")),
         "reward_mean": mean(metric_values(rows, "critic/rewards/mean")),
-        "any_nonzero_grad": any(value > 0 for value in grad_norms),
+        "accuracy_mean": mean(metric_values(rows, "critic/acc/mean")),
+        "overlong_reward_mean": mean(metric_values(rows, "critic/overlong_reward/mean")),
+        "response_length_mean": mean(metric_values(rows, "response_length/mean")),
+        "nonzero_grad_steps": nonzero_grad_steps,
+        "nonzero_advantage_steps": nonzero_advantage_steps,
+        "valid_training_signal": len(rows) == 10
+        and (nonzero_grad_steps > 0 or nonzero_advantage_steps > 0),
     }
 
 

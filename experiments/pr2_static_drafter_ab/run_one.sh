@@ -6,7 +6,6 @@ set -euo pipefail
 : "${MODEL_PATH:?set MODEL_PATH to Qwen3.5-4B}"
 : "${DRAFTER_PATH:?set DRAFTER_PATH to Qwen3.5-4B-DFlash}"
 : "${TRAIN_FILE:?set TRAIN_FILE to the fixed 20-row train parquet}"
-: "${TEST_FILE:?set TEST_FILE to the GSM8K test parquet}"
 : "${OUT:?set OUT to the result directory}"
 : "${FMT:?set FMT to null or auto}"
 
@@ -17,7 +16,8 @@ fi
 
 PYTHON=${PYTHON:-python}
 RESET_RAY=${RESET_RAY:-1}
-RUN="qwen35-dflash-dapo-style-${FMT}"
+TEST_FILE=${TEST_FILE:-$TRAIN_FILE}
+RUN="qwen35-dflash-dapo-math20-${FMT}"
 RUN_DIR="$OUT/$RUN"
 mkdir -p "$RUN_DIR"
 
@@ -43,7 +43,7 @@ export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
   data.train_max_samples=-1 \
   data.val_max_samples=2 \
   data.max_prompt_length=512 \
-  data.max_response_length=512 \
+  data.max_response_length=2048 \
   data.filter_overlong_prompts=True \
   data.filter_overlong_prompts_workers=1 \
   data.truncation=error \
@@ -89,7 +89,7 @@ export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
   actor_rollout_ref.rollout.top_p=1.0 \
   actor_rollout_ref.rollout.top_k=-1 \
   actor_rollout_ref.rollout.max_num_seqs=2 \
-  actor_rollout_ref.rollout.max_num_batched_tokens=2048 \
+  actor_rollout_ref.rollout.max_num_batched_tokens=4096 \
   actor_rollout_ref.rollout.enable_chunked_prefill=False \
   actor_rollout_ref.rollout.enable_prefix_caching=False \
   actor_rollout_ref.rollout.free_cache_engine=False \
@@ -110,6 +110,7 @@ export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
   actor_rollout_ref.rollout.drafter.rollout.cuda_graph_max_bs=2 \
   actor_rollout_ref.rollout.drafter.sglang.draft_load_format="$FMT" \
   +actor_rollout_ref.rollout.engine_kwargs.sglang.log_level=info \
+  +actor_rollout_ref.rollout.engine_kwargs.sglang.random_seed=42 \
   +actor_rollout_ref.rollout.engine_kwargs.sglang.page_size=1 \
   +actor_rollout_ref.rollout.engine_kwargs.sglang.max_total_tokens=8192 \
   +actor_rollout_ref.rollout.engine_kwargs.sglang.max_mamba_cache_size=8 \
@@ -118,10 +119,10 @@ export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
   +actor_rollout_ref.rollout.engine_kwargs.sglang.mamba_scheduler_strategy=extra_buffer \
   reward.reward_manager.name=dapo \
   +reward.reward_kwargs.overlong_buffer_cfg.enable=true \
-  +reward.reward_kwargs.overlong_buffer_cfg.len=128 \
+  +reward.reward_kwargs.overlong_buffer_cfg.len=512 \
   +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0 \
   +reward.reward_kwargs.overlong_buffer_cfg.log=true \
-  +reward.reward_kwargs.max_resp_len=512 \
+  +reward.reward_kwargs.max_resp_len=2048 \
   trainer.n_gpus_per_node=2 \
   trainer.nnodes=1 \
   trainer.logger='["console"]' \
