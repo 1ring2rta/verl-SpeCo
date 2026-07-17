@@ -589,6 +589,76 @@ def main() -> int:
         errors.append(f"could not validate SGLang contract: {type(exc).__name__}: {exc}")
     report["sglang_contract"] = contract
 
+    min_shm_total_mib = env_nonnegative_int(
+        "PREFLIGHT_MIN_SHM_TOTAL_MIB", 1024, errors
+    )
+    min_shm_available_mib = env_nonnegative_int(
+        "PREFLIGHT_MIN_SHM_AVAILABLE_MIB", 512, errors
+    )
+    nccl_shm_disable_value = os.environ.get("NCCL_SHM_DISABLE")
+    nccl_shm_disabled = nccl_shm_disable_value == "1"
+    if nccl_shm_disable_value not in {None, "0", "1"}:
+        errors.append(
+            "NCCL_SHM_DISABLE must be unset, '0', or '1', got "
+            f"{nccl_shm_disable_value!r}"
+        )
+    shm_report: dict[str, Any] = {
+        "minimum_total_mib": min_shm_total_mib,
+        "minimum_available_mib": min_shm_available_mib,
+        "nccl_shm_disable": nccl_shm_disable_value,
+        "nccl_shm_disabled": nccl_shm_disabled,
+        "path": "/dev/shm",
+    }
+    try:
+        shm_stat = os.statvfs("/dev/shm")
+        shm_block_size = shm_stat.f_frsize or shm_stat.f_bsize
+        shm_total_bytes = shm_stat.f_blocks * shm_block_size
+        shm_free_bytes = shm_stat.f_bfree * shm_block_size
+        shm_available_bytes = shm_stat.f_bavail * shm_block_size
+        mountinfo_path = Path("/proc/self/mountinfo")
+        mountinfo_entry = None
+        if mountinfo_path.is_file():
+            mountinfo_entry = next(
+                (
+                    line
+                    for line in mountinfo_path.read_text().splitlines()
+                    if len(line.split()) > 4 and line.split()[4] == "/dev/shm"
+                ),
+                None,
+            )
+        shm_report.update(
+            {
+                "available_bytes": shm_available_bytes,
+                "available_mib": shm_available_bytes // (1024 * 1024),
+                "free_bytes": shm_free_bytes,
+                "mountinfo": mountinfo_entry,
+                "total_bytes": shm_total_bytes,
+                "total_mib": shm_total_bytes // (1024 * 1024),
+                "used_bytes": shm_total_bytes - shm_free_bytes,
+                "used_mib": (shm_total_bytes - shm_free_bytes) // (1024 * 1024),
+            }
+        )
+        if nccl_shm_disabled:
+            warnings.append(
+                "NCCL_SHM_DISABLE is enabled; both A/B arms must keep it enabled, "
+                "and their timings must not be presented as general throughput evidence"
+            )
+        else:
+            if shm_total_bytes < min_shm_total_mib * 1024 * 1024:
+                errors.append(
+                    f"/dev/shm total capacity is {shm_report['total_mib']} MiB; "
+                    f"expected at least {min_shm_total_mib} MiB for TP=2 NCCL"
+                )
+            if shm_available_bytes < min_shm_available_mib * 1024 * 1024:
+                errors.append(
+                    f"/dev/shm available capacity is {shm_report['available_mib']} MiB; "
+                    f"expected at least {min_shm_available_mib} MiB"
+                )
+    except Exception as exc:  # noqa: BLE001
+        shm_report["error"] = f"{type(exc).__name__}: {exc}"
+        errors.append(f"could not validate /dev/shm: {type(exc).__name__}: {exc}")
+    report["shared_memory"] = shm_report
+
     require_idle_gpus = env_flag("PREFLIGHT_REQUIRE_IDLE_GPUS")
     max_idle_memory_mib = env_nonnegative_int(
         "PREFLIGHT_MAX_IDLE_MEMORY_MIB", 1024, errors

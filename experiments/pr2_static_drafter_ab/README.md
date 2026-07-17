@@ -70,6 +70,19 @@ on stock upstream SGLang. This limitation must be disclosed with the PR
 results; an immutable custom-SGLang commit or patch archive is needed before
 making a stronger reproducibility claim.
 
+The tested TP=2 NCCL path uses a POSIX shared-memory allocation. Provision the
+container with at least 1 GiB at `/dev/shm`; 2 GiB is preferred. For Docker,
+use an isolated mount such as `--shm-size=2g --ulimit memlock=-1` rather than
+sharing the host IPC namespace. The preflight requires at least 1,024 MiB
+total and 512 MiB available. Do not delete arbitrary `/dev/shm` files: if a
+large mount is unexpectedly full, stop the owning job and inspect its open
+files first.
+
+If the existing instance cannot be recreated, `export NCCL_SHM_DISABLE=1` is
+an explicit last-resort functional fallback. Keep it identical for both arms.
+Because it can force NCCL onto a network transport when GPU P2P is unavailable,
+record the warning and do not use that run for a general throughput claim.
+
 ## Prepare a data-independent DAPO-Math subset
 
 The official parquet currently contains repeated rows. The helper streams the
@@ -169,6 +182,13 @@ is recorded but is not fatal,
 because this configuration disables remove-padding and forces SDPA. A failure
 in that import during the first actor update would identify an additional VeRL
 compatibility path instead of a drafter-loader failure.
+
+Before the idle-GPU gate, each arm also renders the pinned Qwen3.5 template
+through VeRL's actual processor path and stores `<run>/prompt_mode.json`. It
+must show an open `<think>\n` suffix for `enable_thinking=true` and a closed
+empty block for `false`. Transformers 5.3 may later warn that
+`enable_thinking` is not a processor argument; that warning comes after Jinja
+rendering and does not mean the template ignored the flag.
 
 On a dedicated machine, the script clears stale local Ray state before each
 arm. Set `RESET_RAY=0` if that machine is intentionally attached to a shared

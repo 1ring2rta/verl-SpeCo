@@ -38,6 +38,9 @@ if [[ "$RESET_RAY" == "1" ]]; then
   "$PYTHON" -m ray.scripts.scripts stop --force || true
 fi
 
+"$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/verify_thinking.py" \
+  | tee "$RUN_DIR/prompt_mode.json"
+
 PREFLIGHT_REQUIRE_IDLE_GPUS=1 \
   "$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/preflight.py" \
   | tee "$RUN_DIR/preflight.json"
