@@ -147,7 +147,9 @@ mkdir -p "$OUT"
 
 The command chain releases the `gg` reservation only after preflight succeeds.
 Preflight verifies both exact Hub revisions, every expected weight shard, and
-the absence of incomplete download files before touching the GPUs.
+the absence of incomplete download files before touching the GPUs. Training
+then enables Hugging Face and Transformers offline modes so a proxy failure
+cannot perturb either arm.
 
 Each arm runs the same lightweight, import-free preflight again and stores its
 report as `<run>/preflight.json`. Stop if its status is `error`, if a module

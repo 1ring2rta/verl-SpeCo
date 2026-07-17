@@ -309,6 +309,10 @@ def main() -> int:
             "verl": str(verl_root),
             "sglang": str(sglang_root),
         },
+        "offline": {
+            "hf_hub": os.environ.get("HF_HUB_OFFLINE"),
+            "transformers": os.environ.get("TRANSFORMERS_OFFLINE"),
+        },
         "inputs": {
             "model_path": input_record(
                 "MODEL_PATH",
