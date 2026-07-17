@@ -3,8 +3,12 @@
 import json
 import logging
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from importlib import metadata
+from importlib.machinery import PathFinder
+from pathlib import Path
 from typing import Optional, Sequence
 
 SUPPORTED_VERL_VERSION = "0.8.0"
@@ -45,6 +49,44 @@ def _read_distribution_commit(distribution_name: str = "verl") -> Optional[str]:
     return str(commit_id) if commit_id else None
 
 
+def _read_imported_verl_commit() -> Optional[str]:
+    """Read Git HEAD from the source tree that provides the imported package."""
+
+    spec = PathFinder.find_spec("verl", sys.path)
+    package_file = spec.origin if spec is not None else None
+    if not package_file:
+        return None
+
+    package_path = Path(package_file).resolve()
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(package_path.parent),
+                "rev-parse",
+                "--show-toplevel",
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    lines = completed.stdout.splitlines()
+    if len(lines) != 2:
+        return None
+    repository_root = Path(lines[0]).resolve()
+    try:
+        package_path.relative_to(repository_root)
+    except ValueError:
+        return None
+    return lines[1].strip() or None
+
+
 def _read_imported_verl_version() -> Optional[str]:
     try:
         return metadata.version("verl")
@@ -67,10 +109,17 @@ def resolve_verl_compatibility(
     """Return whether the currently importable verl matches the SPECO base."""
 
     version = _read_imported_verl_version()
-    commit_id = _read_distribution_commit()
+    distribution_commit = _read_distribution_commit()
 
     if version in set(allowed_versions):
-        return VerlCompatibility(version=version, commit_id=commit_id, supported=True, reason="matched version")
+        return VerlCompatibility(
+            version=version,
+            commit_id=distribution_commit,
+            supported=True,
+            reason="matched version",
+        )
+
+    commit_id = _read_imported_verl_commit() or distribution_commit
 
     if commit_id in set(allowed_commits):
         return VerlCompatibility(version=version, commit_id=commit_id, supported=True, reason="matched commit")
