@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+import ast
+import csv
 import hashlib
-import importlib
 import importlib.metadata
 import json
 import os
@@ -12,12 +13,15 @@ import platform
 import subprocess
 import sys
 from datetime import datetime, timezone
+from importlib.machinery import PathFinder
 from pathlib import Path
 from typing import Any
 
 
 EXPECTED_VERL_REVISION = "7aed6b230776f963fa09509c10d9c3a767d1102c"
 PR2_COMMIT = "14a54ce51fbf068e7d8d2ab4a4bb821879300305"
+EXPECTED_TARGET_REVISION = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+EXPECTED_DRAFTER_REVISION = "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf"
 REFERENCE_SGLANG_REVISION = "f08726fd56c7ff6d8bd258f1545f98148fa4ef58"
 REFERENCE_SGLANG_DIFF_SHA256 = (
     "5839e45bcf4c6fc85f11385866fe7f1b00bbe973aba941ec5cf7bf4415eb5b71"
@@ -102,13 +106,47 @@ def distribution_version(name: str) -> str | None:
 
 
 def module_record(module_name: str, distribution_name: str | None = None) -> dict[str, Any]:
-    module = importlib.import_module(module_name)
-    module_file = getattr(module, "__file__", None)
+    spec = PathFinder.find_spec(module_name, sys.path)
+    if spec is None:
+        raise ModuleNotFoundError(module_name)
+    module_path = spec.origin
+    if module_path is None and spec.submodule_search_locations:
+        module_path = next(iter(spec.submodule_search_locations), None)
     return {
         "module": module_name,
-        "path": str(Path(module_file).resolve()) if module_file else None,
+        "path": str(Path(module_path).resolve()) if module_path else None,
         "version": distribution_version(distribution_name or module_name),
     }
+
+
+def python_assignment(path: Path, name: str) -> Any:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.value is not None
+        ):
+            return ast.literal_eval(node.value)
+    raise ValueError(f"could not find literal assignment {name!r} in {path}")
+
+
+def class_annotated_fields(path: Path, class_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                statement.target.id
+                for statement in node.body
+                if isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+            }
+    raise ValueError(f"could not find class {class_name!r} in {path}")
 
 
 def ensure_under(
@@ -126,7 +164,11 @@ def ensure_under(
 
 
 def input_record(
-    name: str, errors: list[str], *, allow_huggingface_id: bool
+    name: str,
+    errors: list[str],
+    *,
+    allow_huggingface_id: bool,
+    expected_revision: str | None = None,
 ) -> dict[str, Any]:
     value = os.environ.get(name)
     if not value:
@@ -143,11 +185,102 @@ def input_record(
         }
         if path.is_file():
             record["sha256"] = sha256_file(path)
+        if expected_revision is not None:
+            validate_local_model(path, expected_revision, record, errors)
         return record
     if allow_huggingface_id and not path.is_absolute():
         return {"value": value, "exists": False, "kind": "huggingface_id"}
     errors.append(f"{name} does not exist: {path}")
     return {"value": value, "exists": False, "kind": "missing"}
+
+
+def validate_local_model(
+    path: Path,
+    expected_revision: str,
+    record: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if not path.is_dir():
+        errors.append(f"model path is not a directory: {path}")
+        return
+
+    config_path = path / "config.json"
+    metadata_path = path / ".cache" / "huggingface" / "download" / "config.json.metadata"
+    incomplete_files = sorted(
+        str(candidate.relative_to(path))
+        for candidate in (path / ".cache" / "huggingface" / "download").rglob(
+            "*.incomplete"
+        )
+    )
+    revision = None
+    if metadata_path.is_file():
+        metadata_lines = metadata_path.read_text().splitlines()
+        revision = metadata_lines[0] if metadata_lines else None
+
+    index_path = path / "model.safetensors.index.json"
+    expected_weight_files: set[str] = set()
+    if index_path.is_file():
+        index = json.loads(index_path.read_text())
+        expected_weight_files = set(index.get("weight_map", {}).values())
+    else:
+        expected_weight_files = {
+            candidate.name for candidate in path.glob("*.safetensors")
+        }
+    missing_weight_files = sorted(
+        filename for filename in expected_weight_files if not (path / filename).is_file()
+    )
+    weight_files = sorted(
+        candidate.name for candidate in path.glob("*.safetensors") if candidate.is_file()
+    )
+    weight_bytes = sum((path / filename).stat().st_size for filename in weight_files)
+    weight_records: dict[str, Any] = {}
+    for filename in weight_files:
+        weight_metadata_path = (
+            path
+            / ".cache"
+            / "huggingface"
+            / "download"
+            / f"{filename}.metadata"
+        )
+        metadata_lines = (
+            weight_metadata_path.read_text().splitlines()
+            if weight_metadata_path.is_file()
+            else []
+        )
+        weight_revision = metadata_lines[0] if metadata_lines else None
+        weight_records[filename] = {
+            "bytes": (path / filename).stat().st_size,
+            "etag": metadata_lines[1] if len(metadata_lines) > 1 else None,
+            "revision": weight_revision,
+        }
+        if weight_revision != expected_revision:
+            errors.append(
+                f"weight {filename} at {path} has revision {weight_revision!r}, "
+                f"expected {expected_revision}"
+            )
+
+    record["model"] = {
+        "config_sha256": sha256_file(config_path),
+        "download_revision": revision,
+        "expected_revision": expected_revision,
+        "incomplete_files": incomplete_files,
+        "missing_weight_files": missing_weight_files,
+        "weight_bytes": weight_bytes,
+        "weight_files": weight_files,
+        "weights": weight_records,
+    }
+    if not config_path.is_file():
+        errors.append(f"model config is missing: {config_path}")
+    if revision != expected_revision:
+        errors.append(
+            f"model at {path} has revision {revision!r}, expected {expected_revision}"
+        )
+    if incomplete_files:
+        errors.append(f"model download is incomplete at {path}: {incomplete_files}")
+    if not expected_weight_files:
+        errors.append(f"no Safetensors weights were found at {path}")
+    if missing_weight_files:
+        errors.append(f"model weight shards are missing at {path}: {missing_weight_files}")
 
 
 def main() -> int:
@@ -178,10 +311,16 @@ def main() -> int:
         },
         "inputs": {
             "model_path": input_record(
-                "MODEL_PATH", errors, allow_huggingface_id=True
+                "MODEL_PATH",
+                errors,
+                allow_huggingface_id=True,
+                expected_revision=EXPECTED_TARGET_REVISION,
             ),
             "drafter_path": input_record(
-                "DRAFTER_PATH", errors, allow_huggingface_id=True
+                "DRAFTER_PATH",
+                errors,
+                allow_huggingface_id=True,
+                expected_revision=EXPECTED_DRAFTER_REVISION,
             ),
             "train_file": input_record(
                 "TRAIN_FILE", errors, allow_huggingface_id=False
@@ -217,9 +356,9 @@ def main() -> int:
     for module_name, distribution_name in module_specs:
         try:
             packages[module_name] = module_record(module_name, distribution_name)
-        except Exception as exc:  # noqa: BLE001 - report every broken import together
+        except Exception as exc:  # noqa: BLE001 - report every broken path together
             packages[module_name] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append(f"could not import {module_name}: {type(exc).__name__}: {exc}")
+            errors.append(f"could not resolve {module_name}: {type(exc).__name__}: {exc}")
     report["packages"] = packages
     for module_name, expected_version in EXPECTED_PACKAGE_VERSIONS.items():
         actual_version = packages.get(module_name, {}).get("version")
@@ -399,11 +538,8 @@ def main() -> int:
 
     contract: dict[str, Any] = {}
     try:
-        from sglang.srt.server_args import ServerArgs
-
-        field_names = set(getattr(ServerArgs, "__dataclass_fields__", {}))
-        if not field_names:
-            field_names = set(getattr(ServerArgs, "__annotations__", {}))
+        server_args_path = sglang_root / "python" / "sglang" / "srt" / "server_args.py"
+        field_names = class_annotated_fields(server_args_path, "ServerArgs")
         missing_fields = sorted(set(REQUIRED_SERVER_ARGS) - field_names)
         contract["required_server_args"] = list(REQUIRED_SERVER_ARGS)
         contract["missing_server_args"] = missing_fields
@@ -414,10 +550,14 @@ def main() -> int:
             sglang_root / "python" / "sglang" / "srt" / "managers" / "scheduler.py"
         )
         scheduler_text = scheduler_path.read_text()
+        scheduler_normalized = ast.unparse(
+            ast.parse(scheduler_text, filename=str(scheduler_path))
+        )
         contract["draft_loader_override_present"] = all(
-            marker in scheduler_text
+            marker in scheduler_normalized
             for marker in (
-                "speculative_draft_load_format",
+                "if self.server_args.speculative_draft_load_format is not None:",
+                "self.server_args.load_format = self.server_args.speculative_draft_load_format",
                 "Using draft model load_format",
             )
         )
@@ -428,54 +568,98 @@ def main() -> int:
         errors.append(f"could not validate SGLang contract: {type(exc).__name__}: {exc}")
     report["sglang_contract"] = contract
 
+    cuda_report: dict[str, Any] = {
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    }
     try:
-        import torch
-
-        cuda_available = torch.cuda.is_available()
-        cuda_report: dict[str, Any] = {
-            "available": cuda_available,
-            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-            "torch_cuda": torch.version.cuda,
-            "device_count": torch.cuda.device_count() if cuda_available else 0,
+        torch_path = Path(packages["torch"]["path"]).parent
+        torch_version_path = torch_path / "version.py"
+        torch_build = {
+            "version": python_assignment(torch_version_path, "__version__"),
+            "cuda": python_assignment(torch_version_path, "cuda"),
+            "git_version": python_assignment(torch_version_path, "git_version"),
         }
-        if cuda_available:
-            cuda_report["devices"] = [
-                torch.cuda.get_device_name(index)
-                for index in range(torch.cuda.device_count())
-            ]
-            if torch.cuda.device_count() < 2:
-                errors.append(
-                    f"only {torch.cuda.device_count()} CUDA device(s) are visible; expected 2"
-                )
-        else:
-            errors.append("torch.cuda.is_available() is false")
-        if torch.version.cuda != "12.8":
+        cuda_report["torch_build"] = torch_build
+        if torch_build["version"] != EXPECTED_PACKAGE_VERSIONS["torch"]:
             errors.append(
-                f"PyTorch CUDA runtime is {torch.version.cuda!r}, expected '12.8'"
+                f"torch/version.py reports {torch_build['version']!r}, expected "
+                f"{EXPECTED_PACKAGE_VERSIONS['torch']!r}"
             )
-        try:
-            cuda_report["nvidia_smi"] = str(
-                run(
-                    [
-                        "nvidia-smi",
-                        "--query-gpu=index,name,driver_version",
-                        "--format=csv,noheader",
-                    ]
-                )
-            ).strip().splitlines()
-        except Exception as exc:  # noqa: BLE001
-            cuda_report["nvidia_smi_error"] = f"{type(exc).__name__}: {exc}"
-        report["cuda"] = cuda_report
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"could not validate CUDA: {type(exc).__name__}: {exc}")
+        if torch_build["cuda"] != "12.8":
+            errors.append(
+                f"PyTorch CUDA runtime is {torch_build['cuda']!r}, expected '12.8'"
+            )
 
-    try:
-        importlib.import_module("flash_attn.bert_padding")
-        report["flash_attn_bert_padding_available"] = True
-    except Exception:
-        # This environment uses SDPA and disables remove-padding, so FA2's
-        # legacy bert_padding module is informative rather than mandatory.
-        report["flash_attn_bert_padding_available"] = False
+        smi_text = str(
+            run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,uuid,name,driver_version",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+        )
+        physical_devices = [
+            {
+                "index": row[0].strip(),
+                "uuid": row[1].strip(),
+                "name": row[2].strip(),
+                "driver_version": row[3].strip(),
+            }
+            for row in csv.reader(smi_text.splitlines(), skipinitialspace=True)
+            if len(row) == 4
+        ]
+        visible_setting = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible_setting is None or not visible_setting.strip():
+            visible_devices = physical_devices
+        elif visible_setting.strip() == "-1":
+            visible_devices = []
+        else:
+            visible_devices = []
+            for token in (part.strip() for part in visible_setting.split(",")):
+                matches = [
+                    device
+                    for device in physical_devices
+                    if device["index"] == token or device["uuid"].startswith(token)
+                ]
+                if len(matches) != 1:
+                    errors.append(f"could not map CUDA_VISIBLE_DEVICES token {token!r}")
+                else:
+                    visible_devices.append(matches[0])
+
+        cuda_report.update(
+            {
+                "available": bool(visible_devices),
+                "device_count": len(visible_devices),
+                "devices": visible_devices,
+                "physical_devices": physical_devices,
+            }
+        )
+        if len(visible_devices) != 2:
+            errors.append(
+                f"{len(visible_devices)} CUDA device(s) are visible; expected exactly 2"
+            )
+        non_h800 = [
+            device["name"] for device in visible_devices if "H800" not in device["name"]
+        ]
+        if non_h800:
+            errors.append(f"expected H800 GPUs, found: {non_h800}")
+    except Exception as exc:  # noqa: BLE001
+        cuda_report["error"] = f"{type(exc).__name__}: {exc}"
+        errors.append(f"could not validate CUDA: {type(exc).__name__}: {exc}")
+    report["cuda"] = cuda_report
+
+    flash_attn_spec = PathFinder.find_spec("flash_attn", sys.path)
+    flash_attn_locations = (
+        list(flash_attn_spec.submodule_search_locations or [])
+        if flash_attn_spec is not None
+        else []
+    )
+    report["flash_attn_bert_padding_available"] = any(
+        (Path(location) / "bert_padding.py").is_file()
+        or (Path(location) / "bert_padding" / "__init__.py").is_file()
+        for location in flash_attn_locations
+    )
 
     report["status"] = "ok" if not errors else "error"
     report["errors"] = errors

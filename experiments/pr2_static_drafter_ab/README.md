@@ -108,12 +108,27 @@ equivalent local snapshots.
 
 ```bash
 mkdir -p "$EXP_ROOT/models"
+export HF_ENDPOINT=https://huggingface.co
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_DOWNLOAD_TIMEOUT=120
+export HF_HUB_ETAG_TIMEOUT=30
+
 "$PYTHON" -m huggingface_hub.cli.hf download Qwen/Qwen3.5-4B \
   --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
-  --local-dir "$EXP_ROOT/models/Qwen3.5-4B"
-"$PYTHON" -m huggingface_hub.cli.hf download z-lab/Qwen3.5-4B-DFlash \
+  --local-dir "$EXP_ROOT/models/Qwen3.5-4B" \
+  --max-workers 1 &&
+  "$PYTHON" -m huggingface_hub.cli.hf download z-lab/Qwen3.5-4B-DFlash \
   --revision 9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf \
-  --local-dir "$EXP_ROOT/models/Qwen3.5-4B-DFlash"
+  --local-dir "$EXP_ROOT/models/Qwen3.5-4B-DFlash" \
+  --max-workers 1
+```
+
+The official endpoint, one download worker, disabled Xet transport, and longer
+timeouts avoid the TLS EOF and lock contention seen behind the local proxy.
+Both downloads are resumable: rerun this block after a transient failure; do
+not delete the partial cache. Do not continue until both commands return zero.
+
+```bash
 
 export MODEL_PATH="$EXP_ROOT/models/Qwen3.5-4B"
 export DRAFTER_PATH="$EXP_ROOT/models/Qwen3.5-4B-DFlash"
@@ -123,21 +138,23 @@ export OUT="$EXP_ROOT/results"
 mkdir -p "$OUT"
 
 "$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/preflight.py" \
-  | tee "$OUT/preflight.manual.json"
-
-# Release the reservation processes only immediately before taking the GPUs.
-pkill gg
-nvidia-smi
-
-FMT=null bash "$SPECO_ROOT/experiments/pr2_static_drafter_ab/run_one.sh" &&
+  | tee "$OUT/preflight.manual.json" &&
+  { pkill gg || true; } &&
+  nvidia-smi &&
+  FMT=null bash "$SPECO_ROOT/experiments/pr2_static_drafter_ab/run_one.sh" &&
   FMT=auto bash "$SPECO_ROOT/experiments/pr2_static_drafter_ab/run_one.sh"
 ```
 
-Each arm runs the same preflight again and stores its report as
-`<run>/preflight.json`. Stop if its status is `error`, if an import resolves
-outside the three configured source roots, or if a reference SGLang hash is
-unexpected. Hash drift is fatal by default; `ALLOW_SGLANG_DRIFT=1` is only for
-an intentional, separately documented runtime and should never be introduced
+The command chain releases the `gg` reservation only after preflight succeeds.
+Preflight verifies both exact Hub revisions, every expected weight shard, and
+the absence of incomplete download files before touching the GPUs.
+
+Each arm runs the same lightweight, import-free preflight again and stores its
+report as `<run>/preflight.json`. Stop if its status is `error`, if a module
+resolves outside the three configured source roots, or if a reference SGLang
+hash is unexpected. Hash drift is fatal by default;
+`ALLOW_SGLANG_DRIFT=1` is only for an intentional, separately documented
+runtime and should never be introduced
 between arms. The preflight also requires clean tracked SpeCo and VeRL trees
 and records the exact experiment commit. Absence of `flash_attn.bert_padding`
 is recorded but is not fatal,
