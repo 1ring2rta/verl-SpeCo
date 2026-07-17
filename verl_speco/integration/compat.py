@@ -52,12 +52,25 @@ def _read_distribution_commit(distribution_name: str = "verl") -> Optional[str]:
 def _read_imported_verl_commit() -> Optional[str]:
     """Read Git HEAD from the source tree that provides the imported package."""
 
-    spec = PathFinder.find_spec("verl", sys.path)
-    package_file = spec.origin if spec is not None else None
+    imported_module = sys.modules.get("verl")
+    package_file = getattr(imported_module, "__file__", None)
+    if imported_module is not None and not package_file:
+        imported_spec = getattr(imported_module, "__spec__", None)
+        package_file = getattr(imported_spec, "origin", None)
+    if imported_module is not None and not package_file:
+        return None
+    if imported_module is None:
+        try:
+            resolved_spec = PathFinder.find_spec("verl", sys.path)
+        except (ImportError, AttributeError, ValueError):
+            return None
+        package_file = resolved_spec.origin if resolved_spec is not None else None
     if not package_file:
         return None
 
     package_path = Path(package_file).resolve()
+    if not package_path.is_file():
+        return None
     try:
         completed = subprocess.run(
             [
@@ -80,9 +93,7 @@ def _read_imported_verl_commit() -> Optional[str]:
     if len(lines) != 2:
         return None
     repository_root = Path(lines[0]).resolve()
-    try:
-        package_path.relative_to(repository_root)
-    except ValueError:
+    if package_path.parent != (repository_root / "verl").resolve():
         return None
     return lines[1].strip() or None
 
@@ -109,9 +120,23 @@ def resolve_verl_compatibility(
     """Return whether the currently importable verl matches the SPECO base."""
 
     version = _read_imported_verl_version()
+    source_commit = _read_imported_verl_commit()
     distribution_commit = _read_distribution_commit()
+    commit_id = source_commit or distribution_commit
+    allowed_version_set = set(allowed_versions)
+    allowed_commit_set = set(allowed_commits)
 
-    if version in set(allowed_versions):
+    # A resolvable source checkout is authoritative over possibly stale
+    # distribution metadata from another installation on sys.path.
+    if source_commit in allowed_commit_set:
+        return VerlCompatibility(
+            version=version,
+            commit_id=source_commit,
+            supported=True,
+            reason="matched commit",
+        )
+
+    if source_commit is None and version in allowed_version_set:
         return VerlCompatibility(
             version=version,
             commit_id=distribution_commit,
@@ -119,13 +144,18 @@ def resolve_verl_compatibility(
             reason="matched version",
         )
 
-    commit_id = _read_imported_verl_commit() or distribution_commit
-
-    if commit_id in set(allowed_commits):
-        return VerlCompatibility(version=version, commit_id=commit_id, supported=True, reason="matched commit")
+    if source_commit is None and distribution_commit in allowed_commit_set:
+        return VerlCompatibility(
+            version=version,
+            commit_id=commit_id,
+            supported=True,
+            reason="matched commit",
+        )
 
     if os.getenv(ALLOW_UNSUPPORTED_ENV, "").lower() in {"1", "true", "yes"}:
-        return VerlCompatibility(version=version, commit_id=commit_id, supported=True, reason="env override")
+        return VerlCompatibility(
+            version=version, commit_id=commit_id, supported=True, reason="env override"
+        )
 
     return VerlCompatibility(
         version=version,
