@@ -34,12 +34,13 @@ export USE_HUB_KERNELS=NO
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 
-"$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/preflight.py" \
-  | tee "$RUN_DIR/preflight.json"
-
 if [[ "$RESET_RAY" == "1" ]]; then
   "$PYTHON" -m ray.scripts.scripts stop --force || true
 fi
+
+PREFLIGHT_REQUIRE_IDLE_GPUS=1 \
+  "$PYTHON" "$SPECO_ROOT/experiments/pr2_static_drafter_ab/preflight.py" \
+  | tee "$RUN_DIR/preflight.json"
 
 "$PYTHON" -m verl_speco.main \
   algorithm.adv_estimator=grpo \

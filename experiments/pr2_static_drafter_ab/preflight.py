@@ -98,6 +98,23 @@ def sha256_file(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_nonnegative_int(name: str, default: int, errors: list[str]) -> int:
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError:
+        errors.append(f"{name} must be a non-negative integer, got {raw_value!r}")
+        return default
+    if value < 0:
+        errors.append(f"{name} must be non-negative, got {value}")
+        return default
+    return value
+
+
 def distribution_version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
@@ -572,8 +589,14 @@ def main() -> int:
         errors.append(f"could not validate SGLang contract: {type(exc).__name__}: {exc}")
     report["sglang_contract"] = contract
 
+    require_idle_gpus = env_flag("PREFLIGHT_REQUIRE_IDLE_GPUS")
+    max_idle_memory_mib = env_nonnegative_int(
+        "PREFLIGHT_MAX_IDLE_MEMORY_MIB", 1024, errors
+    )
     cuda_report: dict[str, Any] = {
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "max_idle_memory_mib": max_idle_memory_mib,
+        "require_idle_gpus": require_idle_gpus,
     }
     try:
         torch_path = Path(packages["torch"]["path"]).parent
@@ -598,7 +621,7 @@ def main() -> int:
             run(
                 [
                     "nvidia-smi",
-                    "--query-gpu=index,uuid,name,driver_version",
+                    "--query-gpu=index,uuid,name,driver_version,memory.used,memory.total",
                     "--format=csv,noheader,nounits",
                 ]
             )
@@ -609,9 +632,11 @@ def main() -> int:
                 "uuid": row[1].strip(),
                 "name": row[2].strip(),
                 "driver_version": row[3].strip(),
+                "memory_used_mib": int(row[4].strip()),
+                "memory_total_mib": int(row[5].strip()),
             }
             for row in csv.reader(smi_text.splitlines(), skipinitialspace=True)
-            if len(row) == 4
+            if len(row) == 6
         ]
         visible_setting = os.environ.get("CUDA_VISIBLE_DEVICES")
         if visible_setting is None or not visible_setting.strip():
@@ -643,11 +668,83 @@ def main() -> int:
             errors.append(
                 f"{len(visible_devices)} CUDA device(s) are visible; expected exactly 2"
             )
+        distinct_visible_uuids = {device["uuid"] for device in visible_devices}
+        if len(distinct_visible_uuids) != 2:
+            errors.append(
+                "CUDA_VISIBLE_DEVICES must resolve to exactly 2 distinct GPUs, got "
+                f"{sorted(distinct_visible_uuids)}"
+            )
         non_h800 = [
             device["name"] for device in visible_devices if "H800" not in device["name"]
         ]
         if non_h800:
             errors.append(f"expected H800 GPUs, found: {non_h800}")
+
+        compute_text = str(
+            run(
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+        )
+        compute_processes = []
+        malformed_compute_rows = []
+        for row in csv.reader(compute_text.splitlines(), skipinitialspace=True):
+            if len(row) != 4:
+                malformed_compute_rows.append(row)
+                continue
+            try:
+                used_memory_mib = int(row[3].strip())
+            except ValueError:
+                malformed_compute_rows.append(row)
+                continue
+            compute_processes.append(
+                {
+                    "gpu_uuid": row[0].strip(),
+                    "pid": row[1].strip(),
+                    "process_name": row[2].strip(),
+                    "used_memory_mib": used_memory_mib,
+                }
+            )
+        cuda_report["malformed_compute_rows"] = malformed_compute_rows
+        if malformed_compute_rows:
+            message = f"could not parse nvidia-smi compute rows: {malformed_compute_rows}"
+            if require_idle_gpus:
+                errors.append(message)
+            else:
+                warnings.append(message)
+        visible_compute_processes = [
+            process
+            for process in compute_processes
+            if process["gpu_uuid"] in distinct_visible_uuids
+        ]
+        cuda_report["compute_processes"] = visible_compute_processes
+        if require_idle_gpus and visible_compute_processes:
+            process_summary = ", ".join(
+                f"pid={process['pid']} gpu={process['gpu_uuid']} "
+                f"memory={process['used_memory_mib']} MiB"
+                for process in visible_compute_processes
+            )
+            errors.append(
+                "visible GPUs are not idle; stop the unrelated compute processes "
+                f"before starting this arm: {process_summary}"
+            )
+        high_memory_devices = [
+            device
+            for device in visible_devices
+            if device["memory_used_mib"] > max_idle_memory_mib
+        ]
+        if require_idle_gpus and high_memory_devices:
+            memory_summary = ", ".join(
+                f"gpu={device['uuid']} memory={device['memory_used_mib']} MiB"
+                for device in high_memory_devices
+            )
+            errors.append(
+                "visible GPUs exceed the idle-memory ceiling "
+                f"({max_idle_memory_mib} MiB): {memory_summary}"
+            )
     except Exception as exc:  # noqa: BLE001
         cuda_report["error"] = f"{type(exc).__name__}: {exc}"
         errors.append(f"could not validate CUDA: {type(exc).__name__}: {exc}")

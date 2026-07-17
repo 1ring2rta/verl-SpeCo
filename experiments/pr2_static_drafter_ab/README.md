@@ -152,9 +152,15 @@ then enables Hugging Face and Transformers offline modes so a proxy failure
 cannot perturb either arm.
 
 Each arm runs the same lightweight, import-free preflight again and stores its
-report as `<run>/preflight.json`. Stop if its status is `error`, if a module
-resolves outside the three configured source roots, or if a reference SGLang
-hash is unexpected. Hash drift is fatal by default;
+report as `<run>/preflight.json`. This second check runs after the optional
+local Ray cleanup and requires two distinct visible GPUs, no compute processes,
+and at most 1,024 MiB already used on either GPU. It reports the NVML PID and
+memory instead of starting VeRL when another job has acquired either GPU. The
+PID can belong to the host namespace and may not resolve inside a container.
+Override `PREFLIGHT_MAX_IDLE_MEMORY_MIB` only for a known, documented driver or
+display allocation. Stop if preflight status is `error`, if a module resolves
+outside the three configured source roots, or if a reference SGLang hash is
+unexpected. Hash drift is fatal by default;
 `ALLOW_SGLANG_DRIFT=1` is only for an intentional, separately documented
 runtime and should never be introduced
 between arms. The preflight also requires clean tracked SpeCo and VeRL trees
@@ -166,8 +172,11 @@ compatibility path instead of a drafter-loader failure.
 
 On a dedicated machine, the script clears stale local Ray state before each
 arm. Set `RESET_RAY=0` if that machine is intentionally attached to a shared
-Ray cluster. A reasonable 2 x H800 estimate is 30--65 minutes per arm and
-1.25--1.8 hours for the pair; the dummy-drafter arm is expected to be slower.
+Ray cluster. The idle-GPU gate deliberately does not kill non-Ray jobs and is
+only a point-in-time check, not a GPU lock. Stop any background job that could
+later acquire CUDA, or use an exclusive scheduler allocation for the entire
+pair. A reasonable 2 x H800 estimate is 30--65 minutes per arm and 1.25--1.8
+hours for the pair; the dummy-drafter arm is expected to be slower.
 
 ## Summarize
 
